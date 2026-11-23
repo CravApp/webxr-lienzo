@@ -209,6 +209,259 @@
       }
     });
 
+    // El reference space que pide tracked-controls al cambiar los input sources
+    // no es el de la cámara. En el Quest 3, en immersive-ar, getPose contra ese
+    // space llega nula y el mando se queda en el origen: no se ve en el passthrough.
+    // Este componente lo coloca con el space del renderer, fuerza el modelo
+    // Touch Plus y, si el glb no carga, dibuja un mando y un rayo visibles.
+    AFRAME.registerComponent('mando-visible', {
+      schema: {
+        hand: {default: 'right', oneOf: ['left', 'right']}
+      },
+
+      init: function () {
+        this.modeloListo = false;
+        this.eventosNativos = false;
+        this.botones = {trigger: false, grip: false};
+        this.ejex = 0;
+        this.ejey = 0;
+        this.matriz = new THREE.Matrix4();
+        this.escala = new THREE.Vector3();
+        this.onModelLoaded = this.onModelLoaded.bind(this);
+        this.onModelError = this.onModelError.bind(this);
+        this.onConnected = this.onConnected.bind(this);
+        this.onDisconnected = this.onDisconnected.bind(this);
+        this.alSalir = this.alSalir.bind(this);
+        this.el.addEventListener('model-loaded', this.onModelLoaded);
+        this.el.addEventListener('model-error', this.onModelError);
+        this.el.addEventListener('controllerconnected', this.onConnected);
+        this.el.addEventListener('controllerdisconnected', this.onDisconnected);
+        if (this.el.sceneEl) this.el.sceneEl.addEventListener('exit-vr', this.alSalir);
+        this.el.object3D.visible = false;
+        this.cargarModeloOficial();
+      },
+
+      remove: function () {
+        if (this.timer) window.clearTimeout(this.timer);
+        if (this.el.sceneEl) this.el.sceneEl.removeEventListener('exit-vr', this.alSalir);
+      },
+
+      urlModelo: function () {
+        var mano = this.data.hand === 'left' ? 'left' : 'right';
+        return 'https://cdn.aframe.io/controllers/meta/quest-touch-plus-' + mano + '.glb';
+      },
+
+      cargarModeloOficial: function () {
+        if (this.pedido) return;
+        this.pedido = true;
+        this.el.setAttribute('gltf-model', this.urlModelo());
+        var self = this;
+        this.timer = window.setTimeout(function () {
+          if (!self.modeloListo) self.crearRespaldo();
+        }, 3000);
+      },
+
+      onModelLoaded: function (evt) {
+        if (evt.target !== this.el) return;
+        var model = (evt.detail && evt.detail.model) || this.el.getObject3D('mesh');
+        var tieneMalla = false;
+        if (model) {
+          model.traverse(function (node) {
+            if (node.isMesh) tieneMalla = true;
+          });
+        }
+        if (!tieneMalla) {
+          this.crearRespaldo();
+          return;
+        }
+        this.modeloListo = true;
+        if (this.timer) window.clearTimeout(this.timer);
+        this.quitarRespaldo();
+        this.opacar(model);
+        model.visible = true;
+      },
+
+      onModelError: function (evt) {
+        if (evt.target !== this.el) return;
+        this.modeloListo = false;
+        this.crearRespaldo();
+      },
+
+      opacar: function (root) {
+        root.traverse(function (node) {
+          if (!node.isMesh) return;
+          node.visible = true;
+          node.frustumCulled = false;
+          var mats = Array.isArray(node.material) ? node.material : [node.material];
+          for (var i = 0; i < mats.length; i++) {
+            var m = mats[i];
+            if (!m) continue;
+            m.transparent = false;
+            m.opacity = 1;
+            m.depthWrite = true;
+            m.alphaTest = 0;
+            m.needsUpdate = true;
+          }
+        });
+      },
+
+      crearRespaldo: function () {
+        if (this.respaldo || this.modeloListo) return;
+        var root = document.createElement('a-entity');
+        root.setAttribute('class', 'mando-respaldo');
+
+        var cuerpo = document.createElement('a-box');
+        cuerpo.setAttribute('width', 0.05);
+        cuerpo.setAttribute('height', 0.04);
+        cuerpo.setAttribute('depth', 0.12);
+        cuerpo.setAttribute('position', '0 -0.005 -0.02');
+        cuerpo.setAttribute('material', 'shader: flat; color: #f4f7fb');
+
+        var anillo = document.createElement('a-cylinder');
+        anillo.setAttribute('radius', 0.018);
+        anillo.setAttribute('height', 0.028);
+        anillo.setAttribute('position', '0 0.028 -0.03');
+        anillo.setAttribute('material', 'shader: flat; color: #c9d4e4');
+
+        var rayo = document.createElement('a-box');
+        rayo.setAttribute('width', 0.006);
+        rayo.setAttribute('height', 0.006);
+        rayo.setAttribute('depth', 0.5);
+        rayo.setAttribute('position', '0 0 -0.32');
+        rayo.setAttribute('material', 'shader: flat; color: #7ec8ff');
+
+        var punta = document.createElement('a-sphere');
+        punta.setAttribute('radius', 0.014);
+        punta.setAttribute('position', '0 0 -0.58');
+        punta.setAttribute('material', 'shader: flat; color: #ffffff');
+
+        root.appendChild(cuerpo);
+        root.appendChild(anillo);
+        root.appendChild(rayo);
+        root.appendChild(punta);
+        this.el.appendChild(root);
+        this.respaldo = root;
+      },
+
+      quitarRespaldo: function () {
+        if (!this.respaldo) return;
+        if (this.respaldo.parentNode) this.respaldo.parentNode.removeChild(this.respaldo);
+        this.respaldo = null;
+      },
+
+      onConnected: function (evt) {
+        var nombre = evt.detail && evt.detail.name;
+        if (nombre === 'meta-touch-controls' || nombre === 'oculus-touch-controls') {
+          this.eventosNativos = true;
+        }
+      },
+
+      onDisconnected: function (evt) {
+        var nombre = evt.detail && evt.detail.name;
+        if (nombre === 'meta-touch-controls' || nombre === 'oculus-touch-controls') {
+          this.eventosNativos = false;
+        }
+      },
+
+      alSalir: function () {
+        this.el.object3D.visible = false;
+        this.botones.trigger = false;
+        this.botones.grip = false;
+        this.ejex = 0;
+        this.ejey = 0;
+      },
+
+      esControlador: function (source) {
+        if (!source || source.handedness !== this.data.hand || !source.gripSpace) return false;
+        var profiles = source.profiles || [];
+        var i;
+        var p;
+        for (i = 0; i < profiles.length; i++) {
+          p = profiles[i];
+          if (p.indexOf('hand') !== -1 && p.indexOf('touch') === -1) return false;
+        }
+        for (i = 0; i < profiles.length; i++) {
+          p = profiles[i];
+          if (p.indexOf('touch') !== -1 || p.indexOf('oculus') !== -1 || p.indexOf('meta-quest') !== -1) {
+            return true;
+          }
+        }
+        return !source.hand && !!source.gamepad;
+      },
+
+      buscar: function (session) {
+        var inputs = session.inputSources || [];
+        var i;
+        for (i = 0; i < inputs.length; i++) {
+          if (this.esControlador(inputs[i])) return inputs[i];
+        }
+        var tracked = null;
+        try { tracked = session.trackedSources; } catch (err) { tracked = null; }
+        if (!tracked) return null;
+        for (i = 0; i < tracked.length; i++) {
+          if (this.esControlador(tracked[i])) return tracked[i];
+        }
+        return null;
+      },
+
+      pulsar: function (nombre, pressed) {
+        pressed = !!pressed;
+        if (this.botones[nombre] === pressed) return;
+        this.botones[nombre] = pressed;
+        this.el.emit(nombre + (pressed ? 'down' : 'up'));
+      },
+
+      emitirBotones: function (source) {
+        var pad = source.gamepad;
+        if (!pad || !pad.buttons) return;
+        this.pulsar('trigger', pad.buttons[0] && pad.buttons[0].pressed);
+        this.pulsar('grip', pad.buttons[1] && pad.buttons[1].pressed);
+        var axes = pad.axes || [];
+        var x = axes.length >= 4 ? (axes[2] || 0) : (axes[0] || 0);
+        var y = axes.length >= 4 ? (axes[3] || 0) : (axes[1] || 0);
+        if (x !== this.ejex || y !== this.ejey) {
+          this.ejex = x;
+          this.ejey = y;
+          this.el.emit('thumbstickmoved', {x: x, y: y});
+        }
+      },
+
+      tock: function () {
+        var scene = this.el.sceneEl;
+        var session = scene && scene.xrSession;
+        var frame = scene && scene.frame;
+        var renderer = scene && scene.renderer;
+        if (!session || !frame || !renderer || !renderer.xr) return;
+        var ref = renderer.xr.getReferenceSpace();
+        if (!ref) return;
+        var source = this.buscar(session);
+        if (!source) return;
+
+        var pose = frame.getPose(source.gripSpace, ref);
+        if (!pose && source.targetRaySpace) pose = frame.getPose(source.targetRaySpace, ref);
+        if (!pose || !pose.transform) return;
+
+        this.matriz.fromArray(pose.transform.matrix);
+        var obj = this.el.object3D;
+        this.matriz.decompose(obj.position, obj.quaternion, this.escala);
+        obj.scale.set(1, 1, 1);
+        obj.visible = true;
+        obj.matrixAutoUpdate = true;
+        obj.updateMatrixWorld(true);
+
+        var mesh = this.el.getObject3D('mesh');
+        if (mesh) mesh.visible = true;
+
+        var ray = this.el.components.raycaster;
+        if (ray && !ray.data.showLine) this.el.setAttribute('raycaster', 'showLine', true);
+
+        if (!this.eventosNativos) this.emitirBotones(source);
+
+        var raycaster = this.el.components.raycaster;
+        if (raycaster && raycaster.checkIntersections) raycaster.checkIntersections();
+      }
+    });
+
     document.addEventListener('DOMContentLoaded', function () {
       const escena = document.querySelector('a-scene');
       const aviso = document.getElementById('aviso');
@@ -272,15 +525,17 @@
 
     <a-entity
       id="mando-izq"
-      meta-touch-controls="hand: left"
-      laser-controls="hand: left"
-      raycaster="objects: .cubo-pintable; far: 3; lineColor: #7ec8ff; lineOpacity: 0.65">
+      meta-touch-controls="hand: left; model: true"
+      laser-controls="hand: left; model: true"
+      raycaster="objects: .cubo-pintable; far: 3; showLine: true; lineColor: #7ec8ff; lineOpacity: 0.95"
+      mando-visible="hand: left">
     </a-entity>
     <a-entity
       id="mando-der"
-      meta-touch-controls="hand: right"
-      laser-controls="hand: right"
-      raycaster="objects: .cubo-pintable; far: 3; lineColor: #7ec8ff; lineOpacity: 0.65">
+      meta-touch-controls="hand: right; model: true"
+      laser-controls="hand: right; model: true"
+      raycaster="objects: .cubo-pintable; far: 3; showLine: true; lineColor: #7ec8ff; lineOpacity: 0.95"
+      mando-visible="hand: right">
     </a-entity>
 
     <a-entity id="camara-rig" position="0 0 0">
