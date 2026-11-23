@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Spike WebXR — Passthrough Quest 3</title>
+  <script src="https://aframe.io/releases/1.8.0/aframe.min.js"></script>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #12141c;
+      color: #f3f4f8;
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+    a-scene {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    #ui {
+      position: fixed;
+      z-index: 20;
+      left: 16px;
+      top: 16px;
+      max-width: min(28rem, calc(100vw - 32px));
+      padding: 16px 18px 14px;
+      border-radius: 14px;
+      background: rgba(16, 18, 26, 0.86);
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(8px);
+      pointer-events: auto;
+    }
+    #ui h1 {
+      margin: 0 0 8px;
+      font-size: 1.15rem;
+      font-weight: 650;
+    }
+    #ui p, #ui li {
+      margin: 0 0 8px;
+      font-size: 0.92rem;
+      line-height: 1.4;
+      color: #d5d8e2;
+    }
+    #ui ul {
+      margin: 0 0 12px;
+      padding-left: 1.15rem;
+    }
+    #entrar-ar {
+      display: inline-block;
+      text-decoration: none;
+      color: #101218;
+      background: #7ec8ff;
+      font-weight: 700;
+      font-size: 1.05rem;
+      padding: 12px 18px;
+      border-radius: 999px;
+      border: 0;
+      cursor: pointer;
+    }
+    #entrar-ar:hover, #entrar-ar:focus {
+      background: #a6dbff;
+    }
+    #aviso {
+      margin-top: 10px;
+      color: #f0d48a;
+      min-height: 0;
+    }
+    body.en-xr #ui {
+      display: none;
+    }
+  </style>
+  <script>
+    AFRAME.registerComponent('cubo-mando', {
+      schema: {
+        autoVelocidad: {type: 'number', default: 22},
+        palancaVelocidad: {type: 'number', default: 120},
+        alcanceAgarre: {type: 'number', default: 0.45}
+      },
+
+      init: function () {
+        this.auto = true;
+        this.agarre = null;
+        this.palanca = {izq: {x: 0, y: 0}, der: {x: 0, y: 0}};
+        this.tmpQ = new THREE.Quaternion();
+        this.tmpQ2 = new THREE.Quaternion();
+        this.tmpV = new THREE.Vector3();
+        this.ejeY = new THREE.Vector3(0, 1, 0);
+        this.ejeX = new THREE.Vector3(1, 0, 0);
+        this.desplazamientoQ = new THREE.Quaternion();
+
+        this.onGatillo = this.onGatillo.bind(this);
+        this.onGripDown = this.onGripDown.bind(this);
+        this.onGripUp = this.onGripUp.bind(this);
+        this.onPalanca = this.onPalanca.bind(this);
+
+        this.el.sceneEl.addEventListener('loaded', this.engancharMandos.bind(this));
+        this.el.sceneEl.addEventListener('controllerconnected', this.engancharMandos.bind(this));
+        // No escuchar "click": el cursor del láser lo emite al soltar el gatillo
+        // si el rayo toca el cubo, y desharía el cambio de triggerdown.
+      },
+
+      engancharMandos: function () {
+        ['#mando-izq', '#mando-der'].forEach((sel) => {
+          const mando = document.querySelector(sel);
+          if (!mando || mando.dataset.cuboMando) return;
+          mando.dataset.cuboMando = '1';
+          mando.addEventListener('triggerdown', this.onGatillo);
+          mando.addEventListener('gripdown', this.onGripDown);
+          mando.addEventListener('gripup', this.onGripUp);
+          mando.addEventListener('thumbstickmoved', this.onPalanca);
+        });
+      },
+
+      onGatillo: function () {
+        this.auto = !this.auto;
+      },
+
+      ejePalanca: function (detalle) {
+        let x = 0;
+        let y = 0;
+        if (detalle) {
+          if (typeof detalle.x === 'number') x = detalle.x;
+          else if (detalle.axis && typeof detalle.axis[0] === 'number') x = detalle.axis[0];
+          if (typeof detalle.y === 'number') y = detalle.y;
+          else if (detalle.axis && typeof detalle.axis[1] === 'number') y = detalle.axis[1];
+        }
+        const zona = 0.15;
+        if (Math.abs(x) < zona) x = 0;
+        if (Math.abs(y) < zona) y = 0;
+        return {x: x, y: y};
+      },
+
+      onPalanca: function (evt) {
+        const id = evt.target && evt.target.id === 'mando-izq' ? 'izq' : 'der';
+        this.palanca[id] = this.ejePalanca(evt.detail);
+      },
+
+      apuntaAlCubo: function (mando) {
+        const ray = mando.components && mando.components.raycaster;
+        if (!ray) return false;
+        const lista = ray.intersectedEls || [];
+        return lista.indexOf(this.el) !== -1;
+      },
+
+      cercaDelCubo: function (mando) {
+        mando.object3D.getWorldPosition(this.tmpV);
+        const pos = this.el.object3D.getWorldPosition(new THREE.Vector3());
+        return this.tmpV.distanceTo(pos) <= this.data.alcanceAgarre;
+      },
+
+      onGripDown: function (evt) {
+        const mando = evt.target;
+        if (!this.apuntaAlCubo(mando) && !this.cercaDelCubo(mando)) return;
+        const cubo = this.el.object3D;
+        const mano = mando.object3D;
+        cubo.updateMatrixWorld(true);
+        mano.updateMatrixWorld(true);
+        const qMano = new THREE.Quaternion();
+        const qCubo = new THREE.Quaternion();
+        mano.getWorldQuaternion(qMano);
+        cubo.getWorldQuaternion(qCubo);
+        this.desplazamientoQ.copy(qMano).invert().multiply(qCubo);
+        this.agarre = mando;
+      },
+
+      onGripUp: function (evt) {
+        if (this.agarre === evt.target) this.agarre = null;
+      },
+
+      aplicarRotacionMundial: function (qMundial) {
+        const obj = this.el.object3D;
+        if (obj.parent) {
+          obj.parent.updateMatrixWorld(true);
+          obj.parent.getWorldQuaternion(this.tmpQ2).invert();
+          obj.quaternion.copy(this.tmpQ2).multiply(qMundial);
+        } else {
+          obj.quaternion.copy(qMundial);
+        }
+      },
+
+      tick: function (tiempo, dtMs) {
+        const dt = Math.min((dtMs || 0) / 1000, 0.05);
+        const obj = this.el.object3D;
+
+        if (this.agarre) {
+          this.agarre.object3D.getWorldQuaternion(this.tmpQ);
+          this.tmpQ.multiply(this.desplazamientoQ);
+          this.aplicarRotacionMundial(this.tmpQ);
+          return;
+        }
+
+        const px = this.palanca.izq.x + this.palanca.der.x;
+        const py = this.palanca.izq.y + this.palanca.der.y;
+        if (px || py) {
+          const rad = THREE.MathUtils.degToRad(this.data.palancaVelocidad * dt);
+          obj.rotateOnWorldAxis(this.ejeY, -px * rad);
+          obj.rotateOnWorldAxis(this.ejeX, py * rad);
+        }
+
+        if (this.auto) {
+          obj.rotateOnWorldAxis(
+            this.ejeY,
+            THREE.MathUtils.degToRad(this.data.autoVelocidad * dt)
+          );
+        }
+      }
+    });
+
+    document.addEventListener('DOMContentLoaded', function () {
+      const escena = document.querySelector('a-scene');
+      const aviso = document.getElementById('aviso');
+
+      escena.addEventListener('enter-vr', function () {
+        document.body.classList.add('en-xr');
+      });
+      escena.addEventListener('exit-vr', function () {
+        document.body.classList.remove('en-xr');
+      });
+
+      escena.addEventListener('loaded', async function () {
+        let ar = false;
+        try {
+          ar = !!(navigator.xr && await navigator.xr.isSessionSupported('immersive-ar'));
+        } catch (err) {
+          ar = false;
+        }
+        if (!ar && aviso) {
+          aviso.textContent = 'Este navegador no ofrece una sesión immersive-ar. En el escritorio puedes ver el cubo; ábrelo en el Meta Quest Browser del Quest 3 para el passthrough.';
+        }
+      });
+    });
+  </script>
+</head>
+<body>
+  <div id="ui">
+    <h1>Spike WebXR — Passthrough</h1>
+    <p>Cubo de 30&nbsp;cm sobre el passthrough del Quest 3. En el escritorio se ve el mismo cubo, sin sesión AR.</p>
+    <ul>
+      <li>El cubo gira solo. El <strong>gatillo</strong> enciende o apaga ese giro.</li>
+      <li>El <strong>thumbstick</strong> lo rota: izquierda/derecha en el eje Y, arriba/abajo en el eje X.</li>
+      <li>Mantén el <strong>grip</strong> cerca del cubo o apuntándolo para agarrarlo y girarlo con el mando.</li>
+    </ul>
+    <a id="entrar-ar" href="#">Entrar en AR</a>
+    <p id="aviso"></p>
+  </div>
+
+  <a-scene
+    xr-mode-ui="XRMode: ar; enterARButton: #entrar-ar"
+    webxr="requiredFeatures: local-floor; optionalFeatures: bounded-floor; referenceSpaceType: local-floor"
+    background="transparent: true"
+    renderer="alpha: true; colorManagement: true; antialias: true"
+    loading-screen="dotsColor: #7ec8ff; backgroundColor: #12141c">
+
+    <a-entity light="type: ambient; intensity: 0.7"></a-entity>
+    <a-entity light="type: directional; intensity: 0.85; color: #fff4e5" position="0.6 2.2 0.8"></a-entity>
+
+    <a-box
+      id="cubo"
+      class="cubo-pintable"
+      position="0 1.2 -1"
+      width="0.3"
+      height="0.3"
+      depth="0.3"
+      color="#ff6a3d"
+      metalness="0.15"
+      roughness="0.35"
+      cubo-mando>
+    </a-box>
+
+    <a-entity
+      id="mando-izq"
+      meta-touch-controls="hand: left"
+      laser-controls="hand: left"
+      raycaster="objects: .cubo-pintable; far: 3; lineColor: #7ec8ff; lineOpacity: 0.65">
+    </a-entity>
+    <a-entity
+      id="mando-der"
+      meta-touch-controls="hand: right"
+      laser-controls="hand: right"
+      raycaster="objects: .cubo-pintable; far: 3; lineColor: #7ec8ff; lineOpacity: 0.65">
+    </a-entity>
+
+    <a-entity id="camara-rig" position="0 0 0">
+      <a-entity camera look-controls wasd-controls position="0 1.6 0"></a-entity>
+    </a-entity>
+  </a-scene>
+</body>
+</html>
